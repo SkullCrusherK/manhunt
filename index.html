@@ -260,6 +260,15 @@
                 <i class="fa-solid fa-hand-back-fist text-2xl"></i> TAG PLAYER!
             </button>
 
+            <!-- Ping button (hunters in the test lobby only) -->
+            <button id="ping-btn" class="hidden absolute bottom-6 left-3 z-[1000] h-14 px-4 bg-sky-600 active:bg-sky-500 text-white border border-sky-400 rounded-2xl shadow-xl flex items-center gap-2.5 text-left">
+                <i class="fa-solid fa-tower-broadcast text-xl"></i>
+                <span class="leading-tight">
+                    <span class="block font-black text-sm uppercase tracking-wider">Ping hiders</span>
+                    <span id="ping-status" class="block text-[10px] text-sky-100">Test lobby · not pinged yet</span>
+                </span>
+            </button>
+
             <!-- Floating Map Actions (right side, within thumb reach on phones) -->
             <div class="absolute bottom-6 right-3 md:right-auto md:left-4 z-[1000] flex flex-col gap-2">
                 <button id="recenter-btn" class="w-14 h-14 bg-slate-900/90 active:bg-slate-800 text-white border border-slate-700 rounded-2xl shadow-xl backdrop-blur transition flex items-center justify-center" title="Recenter on My Location">
@@ -343,6 +352,11 @@
         const playerCircles = {};
         const playersData = {};
 
+        // Test lobby: hunters only see hiders where they were at the last ping
+        const TEST_LOBBY_CODE = "12345";
+        const pingSnapshot = {};   // hider id -> { lat, lng, accuracy } at the last ping
+        const isTestLobby = () => roomCode === TEST_LOBBY_CODE;
+
         // Esri World Topo Map Tile URL (Free, no API key needed)
         const ESRI_TOPO_TILE = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}";
 
@@ -424,6 +438,8 @@
                 alert('Invite link copied to clipboard!');
             });
 
+            document.getElementById('ping-btn').addEventListener('click', pingHiders);
+
             // Player sheet: tap the bar to slide the list up or down (phones only)
             const sidebar = document.getElementById('sidebar');
             const sheetToggle = document.getElementById('sheet-toggle');
@@ -447,7 +463,10 @@
             document.getElementById('join-modal').classList.add('hidden');
             document.getElementById('header-actions').classList.remove('hidden');
             document.getElementById('display-room-code').innerText = roomCode;
-            document.getElementById('room-status-text').innerText = `Lobby: ${roomCode} • Role: ${userRole.toUpperCase()}`;
+            document.getElementById('room-status-text').innerText = `Lobby: ${roomCode}${isTestLobby() ? ' (TEST)' : ''} • Role: ${userRole.toUpperCase()}`;
+            if (isTestLobby() && userRole === 'hunter') {
+                document.getElementById('ping-btn').classList.remove('hidden');
+            }
 
             try {
                 await loadFirebase();
@@ -552,16 +571,24 @@
 
             playerIds.forEach((pid) => {
                 const player = playersData[pid];
-                renderPlayerOnMap(player);
+                const shown = getDisplayedPlayer(player);
+                if (shown) {
+                    renderPlayerOnMap(shown);
+                } else {
+                    removePlayerFromMap(pid);
+                }
 
-                // Compute distance to nearest opposing player
-                if (pid !== userId && currentPosition) {
+                // Compute distance to nearest opposing player.
+                // Hunters measure to what they can see (the last ping in the test lobby);
+                // hiders keep their live hot/cold warning.
+                const target = userRole === 'hunter' ? shown : player;
+                if (pid !== userId && currentPosition && target && player.role !== userRole) {
                     const dist = calculateDistance(
                         currentPosition.latitude, currentPosition.longitude,
-                        player.lat, player.lng
+                        target.lat, target.lng
                     );
 
-                    if (player.role !== userRole && dist < nearestEnemyDistance) {
+                    if (dist < nearestEnemyDistance) {
                         nearestEnemyDistance = dist;
                     }
                 }
@@ -594,6 +621,44 @@
 
             // Update proximity radar card
             updateRadarUI(nearestEnemyDistance);
+        }
+
+        // What this player should see of another player on the map (null = hidden)
+        function getDisplayedPlayer(player) {
+            if (player.id === userId) return player;
+
+            // Hiders never see hunters on the map
+            if (userRole === 'hider' && player.role === 'hunter') return null;
+
+            // Test lobby: hunters see hiders only at their last pinged position
+            if (isTestLobby() && userRole === 'hunter' && player.role === 'hider') {
+                const snap = pingSnapshot[player.id];
+                return snap ? { ...player, lat: snap.lat, lng: snap.lng, accuracy: snap.accuracy } : null;
+            }
+
+            return player;
+        }
+
+        function removePlayerFromMap(id) {
+            if (playerMarkers[id]) { playerMarkers[id].remove(); delete playerMarkers[id]; }
+            if (playerCircles[id]) { playerCircles[id].remove(); delete playerCircles[id]; }
+        }
+
+        // Save every hider's current position; hunters see these spots until the next ping
+        function pingHiders() {
+            let count = 0;
+            Object.values(playersData).forEach((player) => {
+                if (player.role === 'hider' && player.lat && player.lng) {
+                    pingSnapshot[player.id] = { lat: player.lat, lng: player.lng, accuracy: player.accuracy };
+                    count++;
+                }
+            });
+            const time = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+            document.getElementById('ping-status').innerText = count
+                ? `Last ping ${time} · ${count} hider${count === 1 ? '' : 's'}`
+                : `Pinged ${time} · no hiders found`;
+            if (navigator.vibrate) navigator.vibrate(100);
+            updatePlayersListAndMap({});
         }
 
         function updateRadarUI(distance) {
