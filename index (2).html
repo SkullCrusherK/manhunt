@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>GPS Manhunt - Real-Time Outdoor Game</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+    <style>
+        :root {
+            --sheet-h: 60px;                                  /* collapsed player sheet height (phones) */
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
+        }
+
+        html, body { height: 100%; }
+        body { height: 100dvh; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+        button { touch-action: manipulation; }
+        /* The page turns off text selection; text boxes must turn it back on or iPhones won't let you type in them */
+        input, textarea { -webkit-user-select: text; user-select: text; }
+
+        #map { height: 100%; width: 100%; z-index: 1; background: #0f172a; }
+
+        /* ---------- Layout: phones ---------- */
+        /* Map fills the screen above the collapsed player sheet */
+        #map-area {
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            bottom: calc(var(--sheet-h) + var(--safe-bottom));
+        }
+        /* Player list is a bottom sheet that slides up over the map */
+        #sidebar {
+            position: absolute;
+            left: 0; right: 0; bottom: 0;
+            padding-bottom: var(--safe-bottom);
+            border-radius: 1.25rem 1.25rem 0 0;
+            box-shadow: 0 -10px 30px rgba(0,0,0,0.45);
+        }
+        #players-wrap {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.25s ease;
+        }
+        #sidebar.sheet-open #players-wrap { max-height: 50vh; overflow-y: auto; }
+        #sheet-chevron { transition: transform 0.25s ease; }
+        #sidebar.sheet-open #sheet-chevron { transform: rotate(180deg); }
+
+        /* Pinch-to-zoom on phones, so hide the +/- buttons there */
+        .leaflet-control-zoom { display: none; }
+        .leaflet-control-attribution { font-size: 8px !important; max-width: 60vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        /* ---------- Layout: tablets / desktop ---------- */
+        @media (min-width: 768px) {
+            #map-area { position: relative; inset: auto; flex: 1; height: 100%; }
+            #sidebar {
+                position: relative;
+                width: 20rem; height: 100%;
+                border-radius: 0; box-shadow: none; padding-bottom: 0;
+            }
+            #sheet-toggle { pointer-events: none; }
+            #sheet-handle, #sheet-chevron { display: none; }
+            #players-wrap { max-height: none !important; flex: 1; overflow-y: auto; }
+            .leaflet-control-zoom { display: block; }
+        }
+
+        header { padding-top: calc(var(--safe-top) + 0.5rem); }
+
+        /* ---------- Map markers ---------- */
+        .user-marker-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .marker-pin {
+            width: 36px;
+            height: 36px;
+            border-radius: 50% 50% 50% 0;
+            position: absolute;
+            transform: rotate(-45deg);
+            left: 50%;
+            top: 50%;
+            margin: -22px 0 0 -18px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 2px solid #ffffff;
+            transition: all 0.3s ease;
+        }
+
+        .marker-pin i {
+            transform: rotate(45deg);
+            color: white;
+            font-size: 16px;
+        }
+
+        .marker-pulse {
+            border-radius: 50%;
+            height: 52px;
+            width: 52px;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            margin: -26px 0 0 -26px;
+            animation: pulsate 2s ease-out infinite;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        @keyframes pulsate {
+            0% { transform: scale(0.2); opacity: 0.8; }
+            50% { opacity: 0.4; }
+            100% { transform: scale(1.4); opacity: 0; }
+        }
+
+        /* Tag button: a steady glow instead of bouncing, so it's easy to hit while moving */
+        @keyframes tag-glow {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(244,63,94,0.7), 0 10px 30px rgba(244,63,94,0.5); }
+            50% { box-shadow: 0 0 0 12px rgba(244,63,94,0), 0 10px 30px rgba(244,63,94,0.5); }
+        }
+        .tag-glow { animation: tag-glow 1.2s ease-out infinite; }
+
+        @media (prefers-reduced-motion: reduce) {
+            .marker-pulse, .tag-glow, .animate-spin, .animate-pulse { animation: none !important; }
+        }
+
+        /* Custom scrollbars */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); }
+        ::-webkit-scrollbar-thumb { background: rgba(51, 65, 85, 0.8); border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-slate-950 font-sans flex flex-col overflow-hidden select-none text-slate-100">
+
+    <!-- Header Navigation -->
+    <header class="bg-slate-900 border-b border-slate-800 px-3 pb-2 flex items-center justify-between gap-2 z-20 shadow-lg">
+        <div class="flex items-center gap-2.5 min-w-0">
+            <div id="game-badge-icon" class="w-9 h-9 shrink-0 rounded-xl bg-rose-600 flex items-center justify-center shadow-lg shadow-rose-600/30">
+                <i class="fa-solid fa-crosshairs text-lg text-white"></i>
+            </div>
+            <div class="min-w-0">
+                <h1 class="font-extrabold text-base leading-tight tracking-wide flex items-center gap-2">
+                    MANHUNT <span class="text-[9px] bg-rose-500/20 text-rose-400 font-bold px-1.5 py-0.5 rounded-full border border-rose-500/30">GPS LIVE</span>
+                </h1>
+                <p id="room-status-text" class="text-[11px] text-slate-400 truncate">Join a game lobby to start playing</p>
+            </div>
+        </div>
+
+        <!-- Room Header Controls -->
+        <div id="header-actions" class="hidden flex items-center gap-2 shrink-0">
+            <button id="copy-room-btn" title="Copy Invite Link" class="bg-slate-800 border border-slate-700 active:bg-slate-700 rounded-xl h-10 px-3 flex items-center gap-2 transition">
+                <span id="display-room-code" class="font-mono font-black text-amber-400 tracking-wider text-sm">------</span>
+                <i class="fa-regular fa-copy text-slate-400 text-sm"></i>
+            </button>
+            <button id="leave-room-btn" title="Exit" class="bg-rose-500/20 active:bg-rose-500/40 text-rose-300 border border-rose-500/30 h-10 w-10 sm:w-auto sm:px-3 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-1.5">
+                <i class="fa-solid fa-right-from-bracket"></i><span class="hidden sm:inline">Exit</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="flex-1 relative overflow-hidden md:flex md:flex-row">
+
+        <!-- Join Game Modal -->
+        <div id="join-modal" class="absolute inset-0 z-[2000] bg-slate-950/95 backdrop-blur-md flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+            <div class="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-5 sm:p-6 shadow-2xl relative my-auto">
+                <div class="text-center mb-5">
+                    <div class="w-14 h-14 bg-gradient-to-tr from-rose-600 to-amber-500 rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-xl shadow-rose-600/30">
+                        <i class="fa-solid fa-person-running text-2xl text-white"></i>
+                    </div>
+                    <h2 class="text-2xl font-black text-white tracking-wide">JOIN MANHUNT</h2>
+                    <p class="text-slate-400 text-sm mt-1">Real-time GPS hide and seek with your squad</p>
+                </div>
+
+                <form id="join-form" class="space-y-4">
+                    <div>
+                        <label for="user-name-input" class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5">Player Name</label>
+                        <div class="relative">
+                            <i class="fa-solid fa-user absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"></i>
+                            <!-- text-base (16px) stops iPhones zooming in when the field is tapped -->
+                            <input type="text" id="user-name-input" required maxlength="12" placeholder="e.g. HunterX" autocomplete="nickname" enterkeyhint="next"
+                                class="w-full h-12 bg-slate-950 border border-slate-800 rounded-xl pl-11 pr-4 text-base text-white placeholder-slate-600 focus:outline-none focus:border-rose-500 transition">
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="room-code-input" class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5">Game Lobby Code</label>
+                        <div class="flex gap-2">
+                            <div class="relative flex-1">
+                                <i class="fa-solid fa-gamepad absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"></i>
+                                <input type="text" id="room-code-input" required maxlength="8" placeholder="e.g. HUNT12" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go"
+                                    class="w-full h-12 bg-slate-950 border border-slate-800 rounded-xl pl-11 pr-4 text-base text-white uppercase font-mono tracking-wider placeholder-slate-600 focus:outline-none focus:border-rose-500 transition">
+                            </div>
+                            <button type="button" id="random-room-btn" class="h-12 bg-slate-800 active:bg-slate-700 text-slate-300 px-4 rounded-xl text-sm font-bold transition flex items-center gap-1.5">
+                                <i class="fa-solid fa-dice"></i> New
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">Select Team Role</label>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button type="button" id="role-hunter-btn" class="role-select-btn border-2 border-rose-500 bg-rose-500/10 text-white rounded-xl p-3 flex flex-col items-center gap-1.5 transition">
+                                <i class="fa-solid fa-skull text-rose-500 text-xl"></i>
+                                <span class="font-black text-xs uppercase tracking-wider">Hunter</span>
+                                <span class="text-[10px] text-slate-400">Catch the hiders</span>
+                            </button>
+                            <button type="button" id="role-hider-btn" class="role-select-btn border-2 border-transparent bg-slate-800 text-slate-400 rounded-xl p-3 flex flex-col items-center gap-1.5 transition">
+                                <i class="fa-solid fa-ghost text-emerald-400 text-xl"></i>
+                                <span class="font-black text-xs uppercase tracking-wider">Hider</span>
+                                <span class="text-[10px] text-slate-400">Stay hidden</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="w-full h-14 bg-gradient-to-r from-rose-600 to-amber-600 active:from-rose-500 active:to-amber-500 text-white font-black rounded-xl shadow-lg shadow-rose-600/30 transition duration-200 flex items-center justify-center gap-2 mt-2 tracking-wider uppercase text-base">
+                        <i class="fa-solid fa-satellite"></i> Enter Game Radar
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Interactive Map Display -->
+        <div id="map-area">
+            <div id="map"></div>
+
+            <!-- Hot / Cold Proximity Radar Badge -->
+            <div id="radar-card" class="absolute top-3 left-3 z-[1000] bg-slate-900/90 border border-slate-800 backdrop-blur-md pl-2 pr-4 py-2 rounded-2xl shadow-2xl flex items-center gap-2.5">
+                <div id="radar-icon-box" class="w-9 h-9 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400">
+                    <i class="fa-solid fa-satellite-dish"></i>
+                </div>
+                <div class="leading-tight">
+                    <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400" id="radar-title">Nearest Enemy</div>
+                    <div id="radar-distance" class="text-xl font-black font-mono text-white">-- m</div>
+                    <div id="radar-status" class="text-[10px] font-bold text-slate-500">Searching...</div>
+                </div>
+            </div>
+
+            <!-- Tracking Status Banner -->
+            <button id="tracking-bar" type="button" title="Tap to turn on GPS" class="absolute top-3 right-3 z-[1000] bg-slate-900/90 border border-slate-800 backdrop-blur-md px-3 h-9 rounded-full shadow-2xl flex items-center gap-2">
+                <span id="status-dot" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-slate-500"></span>
+                <span id="gps-accuracy-text" class="text-xs font-mono text-slate-300">GPS: Off</span>
+            </button>
+
+            <!-- Shown when location is blocked or unavailable -->
+            <div id="gps-help" class="hidden absolute top-14 right-3 left-3 sm:left-auto sm:w-80 z-[1002] bg-slate-900 border border-amber-500/50 rounded-2xl shadow-2xl p-4">
+                <div class="flex items-start gap-3">
+                    <i class="fa-solid fa-location-dot text-amber-400 text-xl mt-0.5"></i>
+                    <div class="text-sm text-slate-200 space-y-2">
+                        <p id="gps-help-title" class="font-bold text-white">Location is turned off</p>
+                        <p>This game needs your location. To turn it on:</p>
+                        <ul class="list-disc pl-4 space-y-1 text-slate-300 text-[13px]">
+                            <li>If you opened the link from Snapchat, Instagram, Messenger or TikTok, open it in <b>Safari</b> or <b>Chrome</b> instead.</li>
+                            <li><b>iPhone:</b> Settings → Privacy &amp; Security → Location Services → turn it on, then set <b>Safari Websites</b> to <b>While Using</b>.</li>
+                            <li><b>Android:</b> tap the icon left of the web address → Permissions → Location → Allow.</li>
+                        </ul>
+                        <div class="flex gap-2 pt-1">
+                            <button id="gps-retry-btn" type="button" class="flex-1 h-11 bg-amber-500 active:bg-amber-400 text-slate-950 font-black rounded-xl text-sm uppercase tracking-wider">Try again</button>
+                            <button id="gps-help-close" type="button" class="h-11 px-4 bg-slate-800 active:bg-slate-700 text-slate-300 font-bold rounded-xl text-sm">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tag Button (Triggers when < 10 meters) -->
+            <button id="tag-player-btn" class="hidden tag-glow absolute bottom-24 left-1/2 -translate-x-1/2 z-[1000] bg-gradient-to-r from-rose-600 to-red-600 active:from-rose-500 active:to-red-500 text-white font-black h-16 px-8 rounded-2xl border-2 border-white flex items-center gap-2.5 text-lg tracking-wider uppercase whitespace-nowrap">
+                <i class="fa-solid fa-hand-back-fist text-2xl"></i> TAG PLAYER!
+            </button>
+
+            <!-- Tagged button (hiders only): switches you to the hunter team -->
+            <button id="tagged-btn" class="hidden absolute bottom-6 left-3 z-[1000] h-14 px-4 bg-slate-900/90 active:bg-slate-800 text-white border border-rose-500/60 rounded-2xl shadow-xl backdrop-blur flex items-center gap-2.5 text-left">
+                <i class="fa-solid fa-hand text-rose-400 text-xl"></i>
+                <span class="leading-tight">
+                    <span class="block font-black text-sm uppercase tracking-wider">I got tagged</span>
+                    <span class="block text-[10px] text-slate-400">Switch to hunter</span>
+                </span>
+            </button>
+
+            <!-- Ping button (hunters in the test lobby only) -->
+            <button id="ping-btn" class="hidden absolute bottom-6 left-3 z-[1000] h-14 px-4 bg-sky-600 active:bg-sky-500 text-white border border-sky-400 rounded-2xl shadow-xl flex items-center gap-2.5 text-left">
+                <i class="fa-solid fa-tower-broadcast text-xl"></i>
+                <span class="leading-tight">
+                    <span class="block font-black text-sm uppercase tracking-wider">Ping hiders</span>
+                    <span id="ping-status" class="block text-[10px] text-sky-100">Test lobby · not pinged yet</span>
+                </span>
+            </button>
+
+            <!-- Floating Map Actions (right side, within thumb reach on phones) -->
+            <div class="absolute bottom-6 right-3 md:right-auto md:left-4 z-[1000] flex flex-col gap-2">
+                <button id="recenter-btn" class="w-14 h-14 bg-slate-900/90 active:bg-slate-800 text-white border border-slate-700 rounded-2xl shadow-xl backdrop-blur transition flex items-center justify-center" title="Recenter on My Location">
+                    <i class="fa-solid fa-location-crosshairs text-rose-500 text-xl"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Player List: bottom sheet on phones, sidebar on bigger screens -->
+        <div id="sidebar" class="bg-slate-900 border-t md:border-t-0 md:border-l border-slate-800 flex flex-col z-[1001]">
+            <button id="sheet-toggle" type="button" class="w-full flex flex-col items-center shrink-0" aria-expanded="false" aria-controls="players-wrap">
+                <span id="sheet-handle" class="block w-10 h-1 rounded-full bg-slate-700 mt-2"></span>
+                <span class="w-full px-4 flex items-center justify-between" style="height: calc(var(--sheet-h) - 12px);">
+                    <span class="flex items-center gap-2">
+                        <i class="fa-solid fa-users text-rose-500"></i>
+                        <span class="font-black text-xs uppercase tracking-wider text-white">Active Radar Players</span>
+                    </span>
+                    <span class="flex items-center gap-2">
+                        <span id="player-count-badge" class="bg-slate-800 text-slate-300 text-[11px] font-bold px-2.5 py-1 rounded-full border border-slate-700">
+                            0 Players
+                        </span>
+                        <i id="sheet-chevron" class="fa-solid fa-chevron-up text-slate-400 text-sm"></i>
+                    </span>
+                </span>
+            </button>
+
+            <!-- Scrollable Player Cards -->
+            <div id="players-wrap" class="md:border-t md:border-slate-800">
+                <div id="players-list" class="p-3 space-y-2">
+                    <div class="text-center py-8 text-slate-600 text-xs font-medium">
+                        Waiting for GPS position...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Firebase SDK (v11.6.1) -->
+    <script type="module">
+        // Firebase is loaded when you join (see startGameSession), so the rest of the
+        // page still works if the Firebase download is blocked or slow.
+        let initializeApp, getAuth, signInAnonymously, getDatabase, ref, set, onValue, onDisconnect, remove;
+        async function loadFirebase() {
+            const base = "https://www.gstatic.com/firebasejs/11.6.1/";
+            const [appMod, authMod, dbMod] = await Promise.all([
+                import(base + "firebase-app.js"),
+                import(base + "firebase-auth.js"),
+                import(base + "firebase-database.js")
+            ]);
+            ({ initializeApp } = appMod);
+            ({ getAuth, signInAnonymously } = authMod);
+            ({ getDatabase, ref, set, onValue, onDisconnect, remove } = dbMod);
+        }
+
+        const firebaseConfig = typeof __firebase_config !== 'undefined'
+            ? JSON.parse(__firebase_config)
+            : {
+                apiKey: "AIzaSyBGkIjHuVJCrk58K-zHutlfhLxmfc5e-1Y",
+                authDomain: "manhunt-website.firebaseapp.com",
+                databaseURL: "https://manhunt-website-default-rtdb.firebaseio.com",
+                projectId: "manhunt-website",
+                storageBucket: "manhunt-website.firebasestorage.app",
+                messagingSenderId: "382232013204",
+                appId: "1:382232013204:web:53e5b9bbb9704654a3c781",
+                measurementId: "G-FD8P8541B1"
+            };
+
+        let app, auth, db;
+        let roomCode = "";
+        let userId = "usr_" + Math.random().toString(36).substring(2, 9);
+        let userName = "";
+        let userRole = "hunter";
+        let isCaught = false;
+
+        let map, activeTileLayer;
+        let watchPositionId = null;
+        let currentPosition = null;
+
+        const playerMarkers = {};
+        const playerCircles = {};
+        const playersData = {};
+
+        // Test lobby: hunters only see hiders where they were at the last ping
+        const TEST_LOBBY_CODE = "12345";
+        const pingSnapshot = {};   // hider id -> { lat, lng, accuracy } at the last ping
+        const isTestLobby = () => roomCode === TEST_LOBBY_CODE;
+
+        // Esri World Topo Map Tile URL (Free, no API key needed)
+        const ESRI_TOPO_TILE = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}";
+
+        // Set up the join screen first, so it always works even if the map library fails to load
+        function boot() {
+            checkUrlRoomCode();
+            setupUIHandlers();
+            try {
+                initMap();
+            } catch (err) {
+                console.error("Map failed to load:", err);
+            }
+        }
+        if (document.readyState === 'loading') {
+            window.addEventListener('DOMContentLoaded', boot);
+        } else {
+            boot();
+        }
+
+        function initMap() {
+            map = L.map('map', { zoomControl: false }).setView([40.7128, -74.0060], 14);
+            L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+            activeTileLayer = L.tileLayer(ESRI_TOPO_TILE, {
+                maxZoom: 18,
+                attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, IGN, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), swisstopo, MapmyIndia, &copy; OpenStreetMap contributors'
+            }).addTo(map);
+
+            // Tapping the map closes the player sheet so the map is clear again
+            map.on('click', () => {
+                document.getElementById('sidebar').classList.remove('sheet-open');
+                document.getElementById('sheet-toggle').setAttribute('aria-expanded', 'false');
+            });
+        }
+
+        function setupUIHandlers() {
+            const roleHunterBtn = document.getElementById('role-hunter-btn');
+            const roleHiderBtn = document.getElementById('role-hider-btn');
+
+            roleHunterBtn.addEventListener('click', () => {
+                userRole = "hunter";
+                roleHunterBtn.className = "role-select-btn border-2 border-rose-500 bg-rose-500/10 text-white rounded-xl p-3 flex flex-col items-center gap-1.5 transition";
+                roleHiderBtn.className = "role-select-btn border-2 border-transparent bg-slate-800 text-slate-400 rounded-xl p-3 flex flex-col items-center gap-1.5 transition";
+            });
+
+            roleHiderBtn.addEventListener('click', () => {
+                userRole = "hider";
+                roleHiderBtn.className = "role-select-btn border-2 border-emerald-500 bg-emerald-500/10 text-white rounded-xl p-3 flex flex-col items-center gap-1.5 transition";
+                roleHunterBtn.className = "role-select-btn border-2 border-transparent bg-slate-800 text-slate-400 rounded-xl p-3 flex flex-col items-center gap-1.5 transition";
+            });
+
+            document.getElementById('random-room-btn').addEventListener('click', () => {
+                document.getElementById('room-code-input').value = Math.random().toString(36).substring(2, 8).toUpperCase();
+            });
+
+            document.getElementById('join-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                userName = document.getElementById('user-name-input').value.trim();
+                roomCode = document.getElementById('room-code-input').value.trim().toUpperCase();
+
+                if (userName && roomCode) {
+                    startGameSession();
+                }
+            });
+
+            document.getElementById('recenter-btn').addEventListener('click', () => {
+                if (currentPosition && map) {
+                    map.flyTo([currentPosition.latitude, currentPosition.longitude], 17);
+                }
+            });
+
+            document.getElementById('leave-room-btn').addEventListener('click', () => {
+                window.location.reload();
+            });
+
+            document.getElementById('copy-room-btn').addEventListener('click', () => {
+                const url = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
+                navigator.clipboard.writeText(url);
+                alert('Invite link copied to clipboard!');
+            });
+
+            document.getElementById('ping-btn').addEventListener('click', pingHiders);
+
+            document.getElementById('tagged-btn').addEventListener('click', () => {
+                if (confirm('Did a hunter tag you? You will switch to the hunter team.')) {
+                    becomeHunter();
+                }
+            });
+
+            // GPS badge and help panel: tapping asks for location again
+            document.getElementById('tracking-bar').addEventListener('click', () => {
+                if (!currentPosition) startGPSWatch();
+            });
+            document.getElementById('gps-retry-btn').addEventListener('click', () => {
+                document.getElementById('gps-help').classList.add('hidden');
+                startGPSWatch();
+            });
+            document.getElementById('gps-help-close').addEventListener('click', () => {
+                document.getElementById('gps-help').classList.add('hidden');
+            });
+
+            // Player sheet: tap the bar to slide the list up or down (phones only)
+            const sidebar = document.getElementById('sidebar');
+            const sheetToggle = document.getElementById('sheet-toggle');
+            sheetToggle.addEventListener('click', () => {
+                const open = sidebar.classList.toggle('sheet-open');
+                sheetToggle.setAttribute('aria-expanded', String(open));
+            });
+        }
+
+        function checkUrlRoomCode() {
+            const params = new URLSearchParams(window.location.search);
+            const urlRoom = params.get('room');
+            if (urlRoom) {
+                document.getElementById('room-code-input').value = urlRoom.toUpperCase();
+            } else {
+                document.getElementById('room-code-input').value = Math.random().toString(36).substring(2, 8).toUpperCase();
+            }
+        }
+
+        async function startGameSession() {
+            document.getElementById('join-modal').classList.add('hidden');
+            document.getElementById('header-actions').classList.remove('hidden');
+            document.getElementById('display-room-code').innerText = roomCode;
+            document.getElementById('room-status-text').innerText = `Lobby: ${roomCode}${isTestLobby() ? ' (TEST)' : ''} • Role: ${userRole.toUpperCase()}`;
+            updateRoleButtons();
+
+            // Ask for location straight away, while it's still part of the tap on "Enter Game Radar".
+            // Phones are more likely to show the permission prompt this way.
+            startGPSWatch();
+
+            try {
+                await loadFirebase();
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getDatabase(app);
+                await signInAnonymously(auth);
+
+                listenToRoomUpdates();
+                syncPositionToFirebase();   // send a position we may already have
+            } catch (err) {
+                console.error("Firebase Initialization Error:", err);
+            }
+        }
+
+        // Show the right bottom-left button for the current role
+        function updateRoleButtons() {
+            document.getElementById('tagged-btn').classList.toggle('hidden', userRole !== 'hider');
+            document.getElementById('ping-btn').classList.toggle('hidden', !(isTestLobby() && userRole === 'hunter'));
+            document.getElementById('room-status-text').innerText =
+                `Lobby: ${roomCode}${isTestLobby() ? ' (TEST)' : ''} • Role: ${userRole.toUpperCase()}${isCaught ? ' (TAGGED)' : ''}`;
+        }
+
+        // A tagged hider joins the hunters
+        function becomeHunter() {
+            userRole = 'hunter';
+            isCaught = true;
+            updateRoleButtons();
+            updateLocalPlayerMarker();
+            syncPositionToFirebase();
+            updatePlayersListAndMap({});   // redraw: you can now see hiders, not hunters' view rules for hiders
+            if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        }
+
+        function showGPSHelp(title) {
+            document.getElementById('gps-help-title').innerText = title;
+            document.getElementById('gps-help').classList.remove('hidden');
+        }
+
+        function startGPSWatch() {
+            if (!("geolocation" in navigator)) {
+                document.getElementById('gps-accuracy-text').innerText = "GPS: Not supported";
+                showGPSHelp("This browser can't share your location");
+                return;
+            }
+            if (!window.isSecureContext) {
+                showGPSHelp("Location only works on an https:// link");
+                return;
+            }
+            if (watchPositionId !== null) {
+                navigator.geolocation.clearWatch(watchPositionId);
+            }
+            document.getElementById('gps-accuracy-text').innerText = "GPS: Locating...";
+            document.getElementById('status-dot').className = "relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-400 animate-pulse";
+            {
+                watchPositionId = navigator.geolocation.watchPosition(
+                    (pos) => {
+                        currentPosition = {
+                            latitude: pos.coords.latitude,
+                            longitude: pos.coords.longitude,
+                            accuracy: pos.coords.accuracy,
+                            timestamp: Date.now()
+                        };
+
+                        updateLocalPlayerMarker();
+                        syncPositionToFirebase();
+
+                        document.getElementById('gps-accuracy-text').innerText = `GPS: ±${Math.round(pos.coords.accuracy)}m`;
+                        document.getElementById('status-dot').className = "relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500 animate-pulse";
+                        document.getElementById('gps-help').classList.add('hidden');
+                    },
+                    (err) => {
+                        console.warn("GPS Error:", err);
+                        document.getElementById('status-dot').className = "relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500";
+                        if (err.code === 1) {
+                            // Permission denied
+                            document.getElementById('gps-accuracy-text').innerText = "GPS: Blocked (tap)";
+                            showGPSHelp("Location is blocked for this site");
+                        } else {
+                            document.getElementById('gps-accuracy-text').innerText = "GPS: Searching...";
+                        }
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        maximumAge: 1000,
+                        timeout: 10000
+                    }
+                );
+            }
+        }
+
+        function syncPositionToFirebase() {
+            if (!db || !roomCode || !currentPosition) return;
+            const playerRef = ref(db, `rooms/${roomCode}/players/${userId}`);
+
+            set(playerRef, {
+                id: userId,
+                name: userName,
+                role: userRole,
+                lat: currentPosition.latitude,
+                lng: currentPosition.longitude,
+                accuracy: currentPosition.accuracy,
+                lastSeen: Date.now(),
+                isCaught: isCaught
+            });
+
+            onDisconnect(playerRef).remove();
+        }
+
+        function listenToRoomUpdates() {
+            if (!db || !roomCode) return;
+            const roomRef = ref(db, `rooms/${roomCode}/players`);
+
+            onValue(roomRef, (snapshot) => {
+                const data = snapshot.val() || {};
+                updatePlayersListAndMap(data);
+            });
+        }
+
+        function updateLocalPlayerMarker() {
+            if (!currentPosition) return;
+            const localData = {
+                id: userId,
+                name: userName + " (You)",
+                role: userRole,
+                lat: currentPosition.latitude,
+                lng: currentPosition.longitude,
+                accuracy: currentPosition.accuracy,
+                lastSeen: Date.now(),
+                isCaught: isCaught
+            };
+            playersData[userId] = localData;
+            renderPlayerOnMap(localData);
+        }
+
+        function updatePlayersListAndMap(remotePlayers) {
+            Object.assign(playersData, remotePlayers);
+            const playerIds = Object.keys(playersData);
+
+            document.getElementById('player-count-badge').innerText = `${playerIds.length} Players`;
+
+            const listContainer = document.getElementById('players-list');
+            listContainer.innerHTML = '';
+
+            let nearestEnemyDistance = Infinity;
+
+            playerIds.forEach((pid) => {
+                const player = playersData[pid];
+                const shown = getDisplayedPlayer(player);
+                if (shown) {
+                    renderPlayerOnMap(shown);
+                } else {
+                    removePlayerFromMap(pid);
+                }
+
+                // Compute distance to nearest opposing player.
+                // Hunters measure to what they can see (the last ping in the test lobby);
+                // hiders keep their live hot/cold warning.
+                const target = userRole === 'hunter' ? shown : player;
+                if (pid !== userId && currentPosition && target && player.role !== userRole) {
+                    const dist = calculateDistance(
+                        currentPosition.latitude, currentPosition.longitude,
+                        target.lat, target.lng
+                    );
+
+                    if (dist < nearestEnemyDistance) {
+                        nearestEnemyDistance = dist;
+                    }
+                }
+
+                // Render player card in sidebar
+                const card = document.createElement('div');
+                const isHunter = player.role === 'hunter';
+                card.className = `p-3 rounded-xl border flex items-center justify-between ${
+                    isHunter ? 'bg-rose-950/30 border-rose-800/40' : 'bg-emerald-950/30 border-emerald-800/40'
+                }`;
+
+                card.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl ${isHunter ? 'bg-rose-600' : 'bg-emerald-600'} flex items-center justify-center text-white font-bold text-sm">
+                            <i class="fa-solid ${isHunter ? 'fa-skull' : 'fa-ghost'}"></i>
+                        </div>
+                        <div>
+                            <div class="text-sm font-bold text-white flex items-center gap-1.5">
+                                ${player.name}
+                                ${pid === userId ? '<span class="text-[9px] bg-slate-700 px-1.5 py-0.5 rounded text-slate-300">YOU</span>' : ''}
+                            </div>
+                            <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">
+                                ${player.role} ${player.isCaught ? '• CAUGHT' : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+                listContainer.appendChild(card);
+            });
+
+            // Update proximity radar card
+            updateRadarUI(nearestEnemyDistance);
+        }
+
+        // What this player should see of another player on the map (null = hidden)
+        function getDisplayedPlayer(player) {
+            if (player.id === userId) return player;
+
+            // Hiders never see hunters on the map
+            if (userRole === 'hider' && player.role === 'hunter') return null;
+
+            // Test lobby: hunters see hiders only at their last pinged position
+            if (isTestLobby() && userRole === 'hunter' && player.role === 'hider') {
+                const snap = pingSnapshot[player.id];
+                return snap ? { ...player, lat: snap.lat, lng: snap.lng, accuracy: snap.accuracy } : null;
+            }
+
+            return player;
+        }
+
+        function removePlayerFromMap(id) {
+            if (playerMarkers[id]) { playerMarkers[id].remove(); delete playerMarkers[id]; }
+            if (playerCircles[id]) { playerCircles[id].remove(); delete playerCircles[id]; }
+        }
+
+        // Save every hider's current position; hunters see these spots until the next ping
+        function pingHiders() {
+            let count = 0;
+            Object.values(playersData).forEach((player) => {
+                if (player.role === 'hider' && player.lat && player.lng) {
+                    pingSnapshot[player.id] = { lat: player.lat, lng: player.lng, accuracy: player.accuracy };
+                    count++;
+                }
+            });
+            const time = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+            document.getElementById('ping-status').innerText = count
+                ? `Last ping ${time} · ${count} hider${count === 1 ? '' : 's'}`
+                : `Pinged ${time} · no hiders found`;
+            if (navigator.vibrate) navigator.vibrate(100);
+            updatePlayersListAndMap({});
+        }
+
+        function updateRadarUI(distance) {
+            const radarDistEl = document.getElementById('radar-distance');
+            const radarStatusEl = document.getElementById('radar-status');
+
+            if (distance === Infinity || isNaN(distance)) {
+                radarDistEl.innerText = "-- m";
+                radarStatusEl.innerText = "Searching for targets...";
+                radarStatusEl.className = "text-[10px] font-bold text-slate-500";
+                return;
+            }
+
+            const distMeters = Math.round(distance);
+            radarDistEl.innerText = distMeters > 1000 ? `${(distMeters / 1000).toFixed(1)} km` : `${distMeters} m`;
+
+            if (distMeters < 15) {
+                radarStatusEl.innerText = "DANGER ZONE!";
+                radarStatusEl.className = "text-[10px] font-bold text-rose-500 animate-pulse";
+            } else if (distMeters < 50) {
+                radarStatusEl.innerText = "HOT!";
+                radarStatusEl.className = "text-[10px] font-bold text-amber-400";
+            } else {
+                radarStatusEl.innerText = "WARM";
+                radarStatusEl.className = "text-[10px] font-bold text-sky-400";
+            }
+        }
+
+        function renderPlayerOnMap(player) {
+            if (!map || !player.lat || !player.lng) return;
+
+            const isHunter = player.role === 'hunter';
+            const pinColor = isHunter ? '#f43f5e' : '#10b981';
+            const iconClass = isHunter ? 'fa-skull' : 'fa-ghost';
+
+            const customIcon = L.divIcon({
+                className: 'user-marker-icon',
+                html: `
+                    <div class="marker-pulse" style="background-color: ${pinColor};"></div>
+                    <div class="marker-pin" style="background-color: ${pinColor};">
+                        <i class="fa-solid ${iconClass}"></i>
+                    </div>
+                `,
+                iconSize: [40, 40],
+                iconAnchor: [20, 20]
+            });
+
+            // Player switched teams (e.g. tagged): redraw their pin in the new team's colour
+            if (playerMarkers[player.id] && playerMarkers[player.id]._role !== player.role) {
+                removePlayerFromMap(player.id);
+            }
+
+            if (playerMarkers[player.id]) {
+                playerMarkers[player.id].setLatLng([player.lat, player.lng]);
+                playerCircles[player.id].setLatLng([player.lat, player.lng]);
+                playerCircles[player.id].setRadius(player.accuracy || 10);
+            } else {
+                const marker = L.marker([player.lat, player.lng], { icon: customIcon }).addTo(map);
+                const circle = L.circle([player.lat, player.lng], {
+                    radius: player.accuracy || 10,
+                    color: pinColor,
+                    fillColor: pinColor,
+                    fillOpacity: 0.15,
+                    weight: 1
+                }).addTo(map);
+
+                marker.bindPopup(`
+                    <div class="p-1 text-slate-900 font-sans">
+                        <b class="text-sm">${player.name}</b><br/>
+                        <span class="text-xs uppercase font-bold text-slate-500">${player.role}</span>
+                    </div>
+                `);
+
+                marker._role = player.role;
+                playerMarkers[player.id] = marker;
+                playerCircles[player.id] = circle;
+            }
+        }
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371000;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+    </script>
+</body>
+</html>
